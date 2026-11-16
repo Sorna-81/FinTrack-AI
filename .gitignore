@@ -1,0 +1,132 @@
+# ========================================
+# ENVIRONMENT VARIABLES & SECRETS
+# ========================================
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Secret and credential files
+*.pem
+*.key
+secrets/
+credentials/
+service-account*.json
+
+# ========================================
+# PYTHON
+# ========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python packaging
+build/
+dist/
+.eggs/
+*.egg-info/
+wheels/
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Type checking and linting
+.mypy_cache/
+.dmypy.json
+.pyre/
+.ruff_cache/
+
+# ========================================
+# DATABASE
+# ========================================
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# Database backups
+*.dump
+*.bak
+*.backup
+
+# ========================================
+# NODE.JS / REACT / VITE
+# ========================================
+node_modules/
+dist/
+build/
+coverage/
+.vite/
+*.tsbuildinfo
+
+# Package manager logs
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# ========================================
+# FRONTEND BUILD OUTPUT
+# ========================================
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+
+# ========================================
+# BACKEND TEMPORARY FILES
+# ========================================
+backend/__pycache__/
+backend/.pytest_cache/
+backend/.venv/
+
+# ========================================
+# IDE & EDITORS
+# ========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+.DS_Store
+
+# ========================================
+# OPERATING SYSTEM FILES
+# ========================================
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ========================================
+# LOGS & TEMPORARY FILES
+# ========================================
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.temp
+
+# ========================================
+# GENERATED REPORTS
+# ========================================
+*.pdf
+*.xlsx
+*.csv
+
+# ========================================
+# ENVIRONMENT-SPECIFIC FILES
+# ========================================
+.vercel/
+.netlify/

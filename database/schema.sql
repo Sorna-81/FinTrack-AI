@@ -1,0 +1,8 @@
+-- Reference PostgreSQL schema. SQLAlchemy models in backend/app/models.py are the executable source.
+CREATE TABLE users (id BIGSERIAL PRIMARY KEY, name VARCHAR(120) NOT NULL, email VARCHAR(255) NOT NULL UNIQUE, password_hash VARCHAR(255) NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT NOW());
+CREATE TABLE categories (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, name VARCHAR(80) NOT NULL, kind VARCHAR(16) NOT NULL DEFAULT 'expense', color VARCHAR(16) NOT NULL DEFAULT '#5367e8', UNIQUE(user_id,name));
+CREATE TABLE transactions (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, amount DOUBLE PRECISION NOT NULL CHECK(amount > 0), category VARCHAR(80) NOT NULL, description VARCHAR(500) NOT NULL DEFAULT '', kind VARCHAR(16) NOT NULL CHECK(kind IN ('income','expense')), date DATE NOT NULL, payment_method VARCHAR(40) NOT NULL DEFAULT 'Card', created_at TIMESTAMP NOT NULL DEFAULT NOW());
+CREATE INDEX ix_transactions_user_date ON transactions(user_id,date);
+CREATE TABLE budgets (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, category VARCHAR(80) NOT NULL DEFAULT 'All categories', month VARCHAR(7) NOT NULL, amount DOUBLE PRECISION NOT NULL CHECK(amount > 0));
+CREATE TABLE financial_insights (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, message TEXT NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT NOW());
+CREATE TABLE savings_goals (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE, name VARCHAR(120) NOT NULL, target_amount DOUBLE PRECISION NOT NULL CHECK(target_amount > 0), saved_amount DOUBLE PRECISION NOT NULL DEFAULT 0, target_date DATE NULL);
