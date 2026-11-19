@@ -3,6 +3,7 @@ from datetime import date
 import csv, io
 import math
 import logging
+import secrets
 import time
 from uuid import uuid4
 from fastapi import FastAPI, Depends, HTTPException, Query, Response, Request
@@ -27,7 +28,7 @@ from .database import get_db
 from .models import User, Transaction, Budget, Category, SavingsGoal
 from .schemas import Register, Login, TransactionIn, TransactionOut, BudgetIn, GoalIn
 from .security import current_user, hash_password, verify_password, create_session, rotate_refresh_token, revoke_refresh_token
-from .ml import categorize, prediction
+from .ml import categorize, expense_forecast, prediction
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("fintrack.api")
@@ -39,12 +40,25 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 REFRESH_COOKIE = "fintrack_refresh"
 
+def refresh_cookie_secure() -> bool:
+    return settings.app_env == "production" or settings.auth_cookie_samesite == "none"
+
+@app.middleware("http")
+async def protect_metrics(request: Request, call_next):
+    if request.url.path == "/metrics":
+        authorization = request.headers.get("authorization", "")
+        supplied = authorization[7:] if authorization.lower().startswith("bearer ") else request.headers.get("x-metrics-token", "")
+        configured = settings.metrics_token
+        if not configured or not secrets.compare_digest(supplied, configured):
+            return JSONResponse(status_code=401, content={"detail": "Metrics authentication required"})
+    return await call_next(request)
+
 def set_refresh_cookie(response: Response, token: str) -> None:
     response.set_cookie(
         key=REFRESH_COOKIE,
         value=token,
         httponly=True,
-        secure=settings.app_env == "production",
+        secure=refresh_cookie_secure(),
         samesite=settings.auth_cookie_samesite,
         max_age=settings.refresh_token_days * 24 * 60 * 60,
         path="/api/auth",
@@ -149,7 +163,7 @@ def logout(request: Request, response: Response, db: Session = Depends(get_db)):
     token = request.cookies.get(REFRESH_COOKIE)
     if token:
         revoke_refresh_token(db, token)
-    response.delete_cookie(key=REFRESH_COOKIE, path="/api/auth", secure=settings.app_env == "production", httponly=True, samesite=settings.auth_cookie_samesite)
+    response.delete_cookie(key=REFRESH_COOKIE, path="/api/auth", secure=refresh_cookie_secure(), httponly=True, samesite=settings.auth_cookie_samesite)
     response.status_code = 204
     return response
 
@@ -235,6 +249,10 @@ def insights(user: User = Depends(current_user), db: Session = Depends(get_db)):
 
 @app.get("/api/analytics/prediction")
 def predict(user: User = Depends(current_user), db: Session = Depends(get_db)): return prediction(db.query(Transaction).filter_by(user_id=user.id).all())
+
+@app.get("/api/analytics/forecast")
+def forecast(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return expense_forecast(db.query(Transaction).filter_by(user_id=user.id).all())
 
 @app.get("/api/budgets")
 def list_budgets(user: User = Depends(current_user), db: Session = Depends(get_db)): return [{"id":b.id,"category":b.category,"month":b.month,"amount":b.amount} for b in db.query(Budget).filter_by(user_id=user.id).order_by(Budget.month.desc()).all()]

@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 from pathlib import Path
-from uuid import uuid4
+import secrets
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, MetaData
@@ -10,11 +10,17 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
-from backend.app.config import Settings
+from backend.app.config import Settings, database_connect_args, has_sufficient_secret_entropy, normalize_database_url, settings
 from backend.app.database import Base, engine as app_engine, get_db
 from backend.app.main import app, limiter
 from backend.app.models import User, Transaction, AuthSession
 from backend.app.security import hash_password
+
+
+@pytest.fixture(scope="session", autouse=True)
+def require_in_memory_sqlite():
+    assert app_engine.dialect.name == "sqlite"
+    assert app_engine.url.database in (None, "", ":memory:")
 
 
 @pytest.fixture()
@@ -57,6 +63,19 @@ def test_register_login_and_profile(client):
     assert result.cookies.get("fintrack_refresh")
     assert client.post("/api/auth/login", json={"email":"one@example.com","password":"wrong-password"}).status_code == 401
     assert client.post("/api/auth/register", json={"name":"Long Password","email":"long@example.com","password":"x"*73}).status_code == 422
+
+
+def test_cross_site_refresh_cookie_is_secure_and_deletion_matches(client, monkeypatch):
+    monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(settings, "auth_cookie_samesite", "none")
+    registered = client.post("/api/auth/register", json={"name":"Cross Site","email":"cross-site@example.com","password":"safe-password-123"})
+    assert registered.status_code == 201
+    set_cookie = registered.headers["set-cookie"].lower()
+    assert "httponly" in set_cookie and "secure" in set_cookie and "samesite=none" in set_cookie
+
+    deleted = client.post("/api/auth/logout")
+    delete_cookie = deleted.headers["set-cookie"].lower()
+    assert "max-age=0" in delete_cookie and "secure" in delete_cookie and "samesite=none" in delete_cookie
 
 
 def test_transaction_crud_and_ownership(client):
@@ -114,6 +133,8 @@ def test_profile_categories_insights_and_cors(client):
 
 
 def test_database_configuration_and_foreign_keys():
+    expected_env_file = Path(__file__).resolve().parents[1] / "backend" / ".env"
+    assert Path(Settings.model_config["env_file"]).resolve() == expected_env_file.resolve()
     sqlite_connection = app_engine.connect()
     try:
         assert sqlite_connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
@@ -125,35 +146,42 @@ def test_database_configuration_and_foreign_keys():
     assert pg_engine.dialect.name == "postgresql"
     assert pg_engine.dialect.driver == "psycopg"
     pg_engine.dispose()
+    assert normalize_database_url("postgresql://user:pass@db.example.com:5432/postgres") == "postgresql+psycopg://user:pass@db.example.com:5432/postgres"
+    assert normalize_database_url("postgres://user:pass@db.example.com/postgres") == "postgresql+psycopg://user:pass@db.example.com/postgres"
+    assert database_connect_args("sqlite:///test.db", None) == {"check_same_thread": False}
+    assert database_connect_args("postgresql+psycopg://user:pass@localhost/db", "verify-full", True) == {"sslmode": "verify-full", "prepare_threshold": None}
+    assert has_sufficient_secret_entropy(secrets.token_urlsafe(48))
+    assert not has_sufficient_secret_entropy("a" * 64)
     with pytest.raises(ValueError):
         Settings(app_env="production", secret_key="development-only-change-me", frontend_origin="https://fintrack.example")
     with pytest.raises(ValueError):
         Settings(app_env="production", secret_key="replace-this-with-a-long-random-secret", frontend_origin="https://fintrack.example", database_url="postgresql+psycopg://user:pass@localhost:5432/fintrack", rate_limit_storage_uri="rediss://localhost:6379/0")
     with pytest.raises(ValueError):
-        Settings(app_env="production", secret_key="a"*40, frontend_origin="https://fintrack.example", database_url="postgresql+psycopg://user:pass@localhost:5432/fintrack")
-    prod = Settings(app_env="production", secret_key="a"*40, frontend_origin="https://fintrack.example", database_url="postgresql+psycopg://user:pass@localhost:5432/fintrack", rate_limit_storage_uri="rediss://localhost:6379/0")
+        Settings(app_env="production", secret_key="a"*40, frontend_origin="https://fintrack.example", database_url="postgresql+psycopg://user:pass@localhost:5432/fintrack", rate_limit_storage_uri="rediss://localhost:6379/0")
+    strong_secret = secrets.token_urlsafe(48)
+    with pytest.raises(ValueError, match="DATABASE_SSL_MODE=verify-full"):
+        Settings(app_env="production", secret_key=strong_secret, frontend_origin="https://fintrack.example", database_url="postgresql://user:pass@localhost:5432/fintrack", database_ssl_mode="require", rate_limit_storage_uri="rediss://localhost:6379/0")
+    with pytest.raises(ValueError, match="TLS-protected Redis"):
+        Settings(app_env="production", secret_key=strong_secret, frontend_origin="https://fintrack.example", database_url="postgresql://user:pass@localhost:5432/fintrack", database_ssl_mode="verify-full", rate_limit_storage_uri="redis://localhost:6379/0")
+    metrics_token = secrets.token_urlsafe(48)
+    prod = Settings(app_env="production", secret_key=strong_secret, frontend_origin="https://fintrack.example", database_url="postgresql://user:pass@localhost:5432/fintrack", database_ssl_mode="verify-full", rate_limit_storage_uri="rediss://localhost:6379/0", metrics_token=metrics_token)
     assert prod.app_env == "production"
+    assert prod.database_url.startswith("postgresql+psycopg://")
 
 
-def test_sqlite_file_data_persists_after_reconnect():
-    db_path = Path(__file__).resolve().parents[1] / "backend" / f"qa-persistence-{uuid4().hex}.db"
-    url = f"sqlite:///{db_path.as_posix()}"
-    first = create_engine(url, connect_args={"check_same_thread":False})
-    second = None
+def test_sqlite_in_memory_data_persists_across_sessions():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread":False}, poolclass=StaticPool)
+    TestingSession = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    Base.metadata.create_all(engine)
     try:
-        Base.metadata.create_all(first)
-        with sessionmaker(bind=first)() as session:
+        with TestingSession() as session:
             session.add(User(name="Persisted", email="persist@example.com", password_hash=hash_password("test-password-123")))
             session.commit()
-        first.dispose()
-        second = create_engine(url, connect_args={"check_same_thread":False})
-        with sessionmaker(bind=second)() as session:
+        with TestingSession() as session:
             assert session.query(User).filter_by(email="persist@example.com").one().name == "Persisted"
     finally:
-        first.dispose()
-        if second:
-            second.dispose()
-        db_path.unlink(missing_ok=True)
+        Base.metadata.drop_all(engine)
+        engine.dispose()
 
 
 def test_personalized_expense_classifier(client):
@@ -210,13 +238,16 @@ def test_auth_refresh_rotation_replay_and_logout(client):
     assert client.post("/api/auth/refresh").status_code == 401
 
 
-def test_auth_rate_limit_and_health_monitoring(client):
+def test_auth_rate_limit_and_health_monitoring(client, monkeypatch):
     statuses = [client.post("/api/auth/login", json={"email":"missing@example.com","password":"bad-password"}).status_code for _ in range(6)]
     assert statuses[:5] == [401] * 5
     assert statuses[5] == 429
     live = client.get("/api/health/live")
     ready = client.get("/api/health/ready")
-    metrics = client.get("/metrics")
+    metrics_token = secrets.token_urlsafe(48)
+    monkeypatch.setattr(settings, "metrics_token", metrics_token)
+    assert client.get("/metrics").status_code == 401
+    metrics = client.get("/metrics", headers={"Authorization": f"Bearer {metrics_token}"})
     assert live.status_code == 200 and live.json()["status"] == "ok"
     assert ready.status_code == 200 and ready.json()["database"] == "ok"
     assert ready.json()["migrations"] == "current"
@@ -238,38 +269,39 @@ def test_alembic_fresh_install_and_legacy_adoption():
     backend_dir = Path(__file__).resolve().parents[1] / "backend"
     cfg_path = backend_dir / "alembic.ini"
 
-    def config_for(db_path):
+    def config_for(connection):
         cfg = Config(str(cfg_path))
-        cfg.attributes["database_url"] = f"sqlite:///{db_path.as_posix()}"
+        cfg.attributes["connection"] = connection
         return cfg
 
-    fresh_path = backend_dir / f"qa-migration-fresh-{uuid4().hex}.db"
-    legacy_path = backend_dir / f"qa-migration-legacy-{uuid4().hex}.db"
-    engines = []
+    fresh_engine = create_engine("sqlite://", connect_args={"check_same_thread":False}, poolclass=StaticPool)
+    legacy_engine = create_engine("sqlite://", connect_args={"check_same_thread":False}, poolclass=StaticPool)
+    fresh_connection = fresh_engine.connect()
+    legacy_connection = legacy_engine.connect()
     try:
-        command.upgrade(config_for(fresh_path), "head")
-        fresh = create_engine(f"sqlite:///{fresh_path.as_posix()}"); engines.append(fresh)
-        assert {"users","categories","transactions","budgets","financial_insights","savings_goals","auth_sessions","alembic_version"}.issubset(set(inspect(fresh).get_table_names()))
-        command.downgrade(config_for(fresh_path), "base")
-        assert "auth_sessions" not in inspect(fresh).get_table_names()
-        assert "users" in inspect(fresh).get_table_names()
-        command.upgrade(config_for(fresh_path), "head")
+        command.upgrade(config_for(fresh_connection), "head")
+        assert {"users","categories","transactions","budgets","financial_insights","savings_goals","auth_sessions","alembic_version"}.issubset(set(inspect(fresh_engine).get_table_names()))
+        command.downgrade(config_for(fresh_connection), "base")
+        assert "auth_sessions" not in inspect(fresh_engine).get_table_names()
+        assert "users" in inspect(fresh_engine).get_table_names()
+        command.upgrade(config_for(fresh_connection), "head")
 
-        legacy = create_engine(f"sqlite:///{legacy_path.as_posix()}"); engines.append(legacy)
         legacy_metadata = MetaData()
         for name, table in Base.metadata.tables.items():
             if name != "auth_sessions": table.to_metadata(legacy_metadata)
-        legacy_metadata.create_all(legacy)
+        legacy_metadata.create_all(legacy_engine)
         users_table = legacy_metadata.tables["users"]
-        with legacy.begin() as connection:
+        with legacy_engine.begin() as connection:
             connection.execute(users_table.insert().values(name="Existing user", email="keep@example.com", password_hash=hash_password("safe-password-123"), created_at=datetime.now(timezone.utc)))
-        command.upgrade(config_for(legacy_path), "head")
-        assert "auth_sessions" in inspect(legacy).get_table_names()
-        with legacy.connect() as connection:
+        command.upgrade(config_for(legacy_connection), "head")
+        assert "auth_sessions" in inspect(legacy_engine).get_table_names()
+        with legacy_engine.connect() as connection:
             assert connection.execute(users_table.select().where(users_table.c.email=="keep@example.com")).scalar_one_or_none() is not None
     finally:
-        for db_engine in engines: db_engine.dispose()
-        fresh_path.unlink(missing_ok=True); legacy_path.unlink(missing_ok=True)
+        fresh_connection.close()
+        legacy_connection.close()
+        fresh_engine.dispose()
+        legacy_engine.dispose()
 
 
 def test_goals_dashboard_forecast_and_csv(client):
@@ -307,11 +339,27 @@ def test_goals_dashboard_forecast_and_csv(client):
     assert forecast["previous"] == 140
     assert forecast["predicted"] > 0
 
+    detailed_forecast = client.get("/api/analytics/forecast", headers=h1).json()
+    assert detailed_forecast["available"] is True
+    assert detailed_forecast["next_month_expenses"] > 0
+    assert len(detailed_forecast["timeline"]) == 6
+    assert detailed_forecast["category_predictions"][0]["category"] == "Food"
+    assert detailed_forecast["expected_income"] is None
+    assert "PRIVATE OTHER USER" not in str(detailed_forecast)
+
     csv_response = client.get("/api/reports/export.csv", headers=h1)
     assert csv_response.status_code == 200
     assert "Month" in csv_response.text and "PRIVATE OTHER USER" not in csv_response.text
     assert client.delete(f"/api/goals/{goal_id}", headers=h2).status_code == 404
     assert client.delete(f"/api/goals/{goal_id}", headers=h1).status_code == 204
+
+
+def test_detailed_forecast_requires_three_months(client):
+    headers = register(client)
+    response = client.get("/api/analytics/forecast", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["available"] is False
+    assert response.json()["category_predictions"] == []
 
 
 def test_transaction_validation_and_date_filter(client):

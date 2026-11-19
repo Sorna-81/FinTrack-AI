@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: fintrack-api
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r backend/requirements.txt
+    releaseCommand: cd backend && python -m alembic -c alembic.ini upgrade head
+    startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health/live
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_SSL_MODE
+        value: verify-full
+      - key: DATABASE_DISABLE_PREPARED_STATEMENTS
+        value: "true"
+      - key: SECRET_KEY
+        sync: false
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: RATE_LIMIT_STORAGE_URI
+        sync: false
+      - key: METRICS_TOKEN
+        sync: false
+      - key: AUTH_COOKIE_SAMESITE
+        value: none
